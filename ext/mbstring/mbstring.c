@@ -3043,6 +3043,20 @@ try_next_encoding:
 			/* Do we still have more input to process for this candidate encoding? */
 			if (data[i].in_len) {
 				const mbfl_encoding *enc = data[i].enc;
+				/* if encoding has a check function, check input */
+				if (enc->check != NULL) {
+					if (!enc->check(data[i].in, data[i].in_len)) {
+						if (strict) {
+							/* This candidate encoding is not valid, eliminate it from consideration */
+							elist_size--;
+							memmove(&data[i], &data[i+1], (elist_size - i) * sizeof(struct conversion_data));
+							goto try_next_encoding;
+						} else {
+							data[i].demerits += 1000;
+						}
+					}
+				}
+
 				size_t out_len = enc->to_wchar(&data[i].in, &data[i].in_len, wchar_buf, 128, &data[i].state);
 				ZEND_ASSERT(out_len <= 128);
 				/* Check this batch of decoded codepoints; are there any error markers?
@@ -4581,6 +4595,10 @@ MBSTRING_API bool php_mb_check_encoding(const char *input, size_t length, const 
 	uint32_t wchar_buf[128];
 	unsigned char *in = (unsigned char*)input;
 	unsigned int state = 0;
+
+	if(encoding->check != NULL) {
+		return encoding->check(in, length);
+	}
 
 	/* If the input string is not encoded in the given encoding, there is a significant chance
 	 * that this will be seen in the first bytes. Therefore, rather than converting an entire

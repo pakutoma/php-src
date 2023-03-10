@@ -37,6 +37,7 @@ static int mbfl_filt_conv_jis_wchar_flush(mbfl_convert_filter *filter);
 static size_t mb_iso2022jp_to_wchar(unsigned char **in, size_t *in_len, uint32_t *buf, size_t bufsize, unsigned int *state);
 static void mb_wchar_to_iso2022jp(uint32_t *in, size_t len, mb_convert_buf *buf, bool end);
 static void mb_wchar_to_jis(uint32_t *in, size_t len, mb_convert_buf *buf, bool end);
+static bool mb_check_iso2022jp(unsigned char *in, size_t in_len);
 
 const mbfl_encoding mbfl_encoding_jis = {
 	mbfl_no_encoding_jis,
@@ -49,6 +50,7 @@ const mbfl_encoding mbfl_encoding_jis = {
 	&vtbl_wchar_jis,
 	mb_iso2022jp_to_wchar,
 	mb_wchar_to_jis,
+	mb_check_iso2022jp
 };
 
 const mbfl_encoding mbfl_encoding_2022jp = {
@@ -61,7 +63,8 @@ const mbfl_encoding mbfl_encoding_2022jp = {
 	&vtbl_2022jp_wchar,
 	&vtbl_wchar_2022jp,
 	mb_iso2022jp_to_wchar,
-	mb_wchar_to_iso2022jp
+	mb_wchar_to_iso2022jp,
+	mb_check_iso2022jp
 };
 
 const struct mbfl_convert_vtbl vtbl_jis_wchar = {
@@ -779,4 +782,96 @@ static void mb_wchar_to_jis(uint32_t *in, size_t len, mb_convert_buf *buf, bool 
 	}
 
 	MB_CONVERT_BUF_STORE(buf, out, limit);
+}
+
+static bool mb_check_iso2022jp(unsigned char *in, size_t in_len)
+{
+	unsigned char *p = in, *e = p + in_len;
+	unsigned int state = ASCII;
+
+	while (p < e) {
+		unsigned char c = *p++;
+		if (c == 0x1B) {
+			/* ESC seen; this is an escape sequence */
+			if ((e - p) < 2) {
+				return false;
+			}
+			unsigned char c2 = *p++;
+			if (c2 == '$') {
+				unsigned char c3 = *p++;
+				if (c3 == '@' || c3 == 'B') {
+					state = JISX_0208;
+				} else if (c3 == '(') {
+					if (p == e) {
+						return false;
+					}
+					unsigned char c4 = *p++;
+					if (c4 == '@' || c4 == 'B') {
+						state = JISX_0208;
+					} else if (c4 == 'D') {
+						state = JISX_0212;
+					} else {
+						return false;
+					}
+				} else {
+					return false;
+				}
+			} else if (c2 == '(') {
+				unsigned char c3 = *p++;
+				if (c3 == 'B' || c3 == 'H') {
+					state = ASCII;
+				} else if (c3 == 'J') {
+					state = JISX_0201_LATIN;
+				} else if (c3 == 'I') {
+					state = JISX_0201_KANA;
+				} else {
+					return false;
+				}
+			} else {
+				return false;
+			}
+		} else if (c == 0xE) {
+			/* "Kana In" marker; this is just for JIS-7/8, but we also accept it for ISO-2022-JP */
+			state = JISX_0201_KANA;
+		} else if (c == 0xF) {
+			/* "Kana Out" marker */
+			state = ASCII;
+		} else if (state >= JISX_0208 && (c > 0x20 && c < 0x7F)) {
+			if (p == e) {
+				return false;
+			}
+			unsigned char c2 = *p++;
+			if (c2 > 0x20 && c2 < 0x7F) {
+				unsigned int s = (c - 0x21)*94 + c2 - 0x21;
+				uint32_t w = 0;
+				if (state == JISX_0208) {
+					if (s < jisx0208_ucs_table_size) {
+						w = jisx0208_ucs_table[s];
+					}
+					if (w > 0) {
+						continue;
+					}
+				} else {
+					if (s < jisx0212_ucs_table_size) {
+						w = jisx0212_ucs_table[s];
+					}
+					if (w > 0) {
+						continue;
+					}
+				}
+				return false;
+			} else {
+				return false;
+			}
+		} else if (c < 0x80) {
+			continue;
+		} else if (c >= 0xA1 && c <= 0xDF) {
+			/* GR-invoked Kana; Conversion is accepted, check is not. */
+			return false;
+		} else {
+			return false;
+		}
+	}
+
+	return state == ASCII;
 }
